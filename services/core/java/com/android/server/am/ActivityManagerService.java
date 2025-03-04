@@ -14310,8 +14310,364 @@ public class ActivityManagerService extends IActivityManager.Stub
     public Intent registerReceiverWithFeature(IApplicationThread caller, String callerPackage,
             String callerFeatureId, String receiverId, IIntentReceiver receiver,
             IntentFilter filter, String permission, int userId, int flags) {
-        return mBroadcastController.registerReceiverWithFeature(caller, callerPackage,
-                callerFeatureId, receiverId, receiver, filter, permission, userId, flags);
+        traceRegistrationBegin(receiverId, receiver, filter, userId);
+        try {
+            return registerReceiverWithFeatureTraced(caller, callerPackage, callerFeatureId,
+                    receiverId, receiver, filter, permission, userId, flags);
+        } finally {
+            traceRegistrationEnd();
+        }
+    }
+
+    private static void traceRegistrationBegin(String receiverId, IIntentReceiver receiver,
+            IntentFilter filter, int userId) {
+        if (!Flags.traceReceiverRegistration()) {
+            return;
+        }
+        if (Trace.isTagEnabled(Trace.TRACE_TAG_ACTIVITY_MANAGER)) {
+            final StringBuilder sb = new StringBuilder("registerReceiver: ");
+            sb.append(Binder.getCallingUid()); sb.append('/');
+            sb.append(receiverId == null ? "null" : receiverId); sb.append('/');
+            final int actionsCount = filter.safeCountActions();
+            if (actionsCount > 0) {
+                for (int i = 0; i < actionsCount; ++i) {
+                    sb.append(filter.getAction(i));
+                    if (i != actionsCount - 1) sb.append(',');
+                }
+            } else {
+                sb.append("null");
+            }
+            sb.append('/');
+            sb.append('u'); sb.append(userId); sb.append('/');
+            sb.append(receiver == null ? "null" : receiver.asBinder());
+            Trace.traceBegin(Trace.TRACE_TAG_ACTIVITY_MANAGER, sb.toString());
+        }
+    }
+
+    private static void traceRegistrationEnd() {
+        if (!Flags.traceReceiverRegistration()) {
+            return;
+        }
+        if (Trace.isTagEnabled(Trace.TRACE_TAG_ACTIVITY_MANAGER)) {
+            Trace.traceEnd(Trace.TRACE_TAG_ACTIVITY_MANAGER);
+        }
+    }
+
+    private Intent registerReceiverWithFeatureTraced(IApplicationThread caller,
+            String callerPackage, String callerFeatureId, String receiverId,
+            IIntentReceiver receiver, IntentFilter filter, String permission,
+            int userId, int flags) {
+        enforceNotIsolatedCaller("registerReceiver");
+        ArrayList<StickyBroadcast> stickyBroadcasts = null;
+        ProcessRecord callerApp = null;
+        final boolean visibleToInstantApps
+                = (flags & Context.RECEIVER_VISIBLE_TO_INSTANT_APPS) != 0;
+
+        int callingUid;
+        int callingPid;
+        boolean instantApp;
+        synchronized (mProcLock) {
+            callerApp = getRecordForAppLOSP(caller);
+            if (callerApp == null) {
+                Slog.w(TAG, "registerReceiverWithFeature: no app for " + caller);
+                return null;
+            }
+            if (!UserHandle.isCore(callerApp.info.uid)
+                    && !callerApp.getPkgList().containsKey(callerPackage)) {
+                throw new SecurityException("Given caller package " + callerPackage
+                        + " is not running in process " + callerApp);
+            }
+            callingUid = callerApp.info.uid;
+            callingPid = callerApp.getPid();
+
+            instantApp = isInstantApp(callerApp, callerPackage, callingUid);
+        }
+        userId = mUserController.handleIncomingUser(callingPid, callingUid, userId, true,
+                ALLOW_FULL_ONLY, "registerReceiver", callerPackage);
+
+        // Warn if system internals are registering for important broadcasts
+        // without also using a priority to ensure they process the event
+        // before normal apps hear about it
+        if (UserHandle.isCore(callingUid)) {
+            final int priority = filter.getPriority();
+            final boolean systemPriority = (priority >= IntentFilter.SYSTEM_HIGH_PRIORITY)
+                    || (priority <= IntentFilter.SYSTEM_LOW_PRIORITY);
+            if (!systemPriority) {
+                final int N = filter.countActions();
+                for (int i = 0; i < N; i++) {
+                    // TODO: expand to additional important broadcasts over time
+                    final String action = filter.getAction(i);
+                    if (action.startsWith("android.intent.action.USER_")
+                            || action.startsWith("android.intent.action.PACKAGE_")
+                            || action.startsWith("android.intent.action.UID_")
+                            || action.startsWith("android.intent.action.EXTERNAL_")
+                            || action.startsWith("android.bluetooth.")
+                            || action.equals(Intent.ACTION_SHUTDOWN)) {
+                        if (DEBUG_BROADCAST) {
+                            Slog.wtf(TAG,
+                                    "System internals registering for " + filter.toLongString()
+                                            + " with app priority; this will race with apps!",
+                                    new Throwable());
+                        }
+
+                        // When undefined, assume that system internals need
+                        // to hear about the event first; they can use
+                        // SYSTEM_LOW_PRIORITY if they need to hear last
+                        if (priority == 0) {
+                            filter.setPriority(IntentFilter.SYSTEM_HIGH_PRIORITY);
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        Iterator<String> actions = filter.actionsIterator();
+        if (actions == null) {
+            ArrayList<String> noAction = new ArrayList<String>(1);
+            noAction.add(null);
+            actions = noAction.iterator();
+        }
+        boolean onlyProtectedBroadcasts = true;
+
+        // Collect stickies of users and check if broadcast is only registered for protected
+        // broadcasts
+        int[] userIds = { UserHandle.USER_ALL, UserHandle.getUserId(callingUid) };
+        synchronized (mStickyBroadcasts) {
+            while (actions.hasNext()) {
+                String action = actions.next();
+                for (int id : userIds) {
+                    ArrayMap<String, ArrayList<StickyBroadcast>> stickies =
+                            mStickyBroadcasts.get(id);
+                    if (stickies != null) {
+                        ArrayList<StickyBroadcast> broadcasts = stickies.get(action);
+                        if (broadcasts != null) {
+                            if (stickyBroadcasts == null) {
+                                stickyBroadcasts = new ArrayList<>();
+                            }
+                            stickyBroadcasts.addAll(broadcasts);
+                        }
+                    }
+                }
+                if (onlyProtectedBroadcasts) {
+                    try {
+                        onlyProtectedBroadcasts &=
+                                AppGlobals.getPackageManager().isProtectedBroadcast(action);
+                    } catch (RemoteException e) {
+                        onlyProtectedBroadcasts = false;
+                        Slog.w(TAG, "Remote exception", e);
+                    }
+                }
+            }
+        }
+
+        if (Process.isSdkSandboxUid(Binder.getCallingUid())) {
+            SdkSandboxManagerLocal sdkSandboxManagerLocal =
+                    LocalManagerRegistry.getManager(SdkSandboxManagerLocal.class);
+            if (sdkSandboxManagerLocal == null) {
+                throw new IllegalStateException("SdkSandboxManagerLocal not found when checking"
+                        + " whether SDK sandbox uid can register to broadcast receivers.");
+            }
+            if (!sdkSandboxManagerLocal.canRegisterBroadcastReceiver(
+                    /*IntentFilter=*/ filter, flags, onlyProtectedBroadcasts)) {
+                throw new SecurityException("SDK sandbox not allowed to register receiver"
+                        + " with the given IntentFilter: " + filter.toLongString());
+            }
+        }
+
+        // If the change is enabled, but neither exported or not exported is set, we need to log
+        // an error so the consumer can know to explicitly set the value for their flag.
+        // If the caller is registering for a sticky broadcast with a null receiver, we won't
+        // require a flag
+        final boolean explicitExportStateDefined =
+                (flags & (Context.RECEIVER_EXPORTED | Context.RECEIVER_NOT_EXPORTED)) != 0;
+        if (((flags & Context.RECEIVER_EXPORTED) != 0) && (
+                (flags & Context.RECEIVER_NOT_EXPORTED) != 0)) {
+            throw new IllegalArgumentException(
+                    "Receiver can't specify both RECEIVER_EXPORTED and RECEIVER_NOT_EXPORTED"
+                            + "flag");
+        }
+
+        // Don't enforce the flag check if we're EITHER registering for only protected
+        // broadcasts, or the receiver is null (a sticky broadcast). Sticky broadcasts should
+        // not be used generally, so we will be marking them as exported by default
+        boolean requireExplicitFlagForDynamicReceivers = CompatChanges.isChangeEnabled(
+                DYNAMIC_RECEIVER_EXPLICIT_EXPORT_REQUIRED, callingUid);
+
+        // A receiver that is visible to instant apps must also be exported.
+        final boolean unexportedReceiverVisibleToInstantApps =
+                ((flags & Context.RECEIVER_VISIBLE_TO_INSTANT_APPS) != 0) && (
+                        (flags & Context.RECEIVER_NOT_EXPORTED) != 0);
+        if (unexportedReceiverVisibleToInstantApps && requireExplicitFlagForDynamicReceivers) {
+            throw new IllegalArgumentException(
+                    "Receiver can't specify both RECEIVER_VISIBLE_TO_INSTANT_APPS and "
+                            + "RECEIVER_NOT_EXPORTED flag");
+        }
+
+        if (!onlyProtectedBroadcasts) {
+            if (receiver == null && !explicitExportStateDefined) {
+                // sticky broadcast, no flag specified (flag isn't required)
+                flags |= Context.RECEIVER_EXPORTED;
+            } else if (requireExplicitFlagForDynamicReceivers && !explicitExportStateDefined) {
+                throw new SecurityException(
+                        callerPackage + ": One of RECEIVER_EXPORTED or "
+                                + "RECEIVER_NOT_EXPORTED should be specified when a receiver "
+                                + "isn't being registered exclusively for system broadcasts");
+                // Assume default behavior-- flag check is not enforced
+            } else if (!requireExplicitFlagForDynamicReceivers && (
+                    (flags & Context.RECEIVER_NOT_EXPORTED) == 0)) {
+                // Change is not enabled, assume exported unless otherwise specified.
+                flags |= Context.RECEIVER_EXPORTED;
+            }
+        } else if ((flags & Context.RECEIVER_NOT_EXPORTED) == 0) {
+            flags |= Context.RECEIVER_EXPORTED;
+        }
+
+        // Dynamic receivers are exported by default for versions prior to T
+        final boolean exported = (flags & Context.RECEIVER_EXPORTED) != 0;
+
+        ArrayList<StickyBroadcast> allSticky = null;
+        if (stickyBroadcasts != null) {
+            final ContentResolver resolver = mContext.getContentResolver();
+            // Look for any matching sticky broadcasts...
+            for (int i = 0, N = stickyBroadcasts.size(); i < N; i++) {
+                final StickyBroadcast broadcast = stickyBroadcasts.get(i);
+                Intent intent = broadcast.intent;
+                // Don't provided intents that aren't available to instant apps.
+                if (instantApp &&
+                        (intent.getFlags() & Intent.FLAG_RECEIVER_VISIBLE_TO_INSTANT_APPS) == 0) {
+                    continue;
+                }
+                // If intent has scheme "content", it will need to access
+                // provider that needs to lock mProviderMap in ActivityThread
+                // and also it may need to wait application response, so we
+                // cannot lock ActivityManagerService here.
+                final int match;
+                if (Flags.avoidResolvingType()) {
+                    match = filter.match(intent.getAction(), broadcast.resolvedDataType,
+                        intent.getScheme(), intent.getData(), intent.getCategories(),
+                        TAG, false /* supportsWildcards */, null /* ignoreActions */,
+                        intent.getExtras());
+                } else {
+                    match = filter.match(resolver, intent, true, TAG);
+                }
+                if (match >= 0) {
+                    if (allSticky == null) {
+                        allSticky = new ArrayList<>();
+                    }
+                    allSticky.add(broadcast);
+                }
+            }
+        }
+
+        // The first sticky in the list is returned directly back to the client.
+        Intent sticky = allSticky != null ? allSticky.get(0).intent : null;
+        if (DEBUG_BROADCAST) Slog.v(TAG_BROADCAST, "Register receiver " + filter + ": " + sticky);
+        if (receiver == null) {
+            return sticky;
+        }
+
+        // SafetyNet logging for b/177931370. If any process other than system_server tries to
+        // listen to this broadcast action, then log it.
+        if (callingPid != Process.myPid()) {
+            if (filter.hasAction("com.android.server.net.action.SNOOZE_WARNING")
+                    || filter.hasAction("com.android.server.net.action.SNOOZE_RAPID")) {
+                EventLog.writeEvent(0x534e4554, "177931370", callingUid, "");
+            }
+        }
+
+        synchronized (this) {
+            IApplicationThread thread;
+            if (callerApp != null && ((thread = callerApp.getThread()) == null
+                    || thread.asBinder() != caller.asBinder())) {
+                // Original caller already died
+                return null;
+            }
+            ReceiverList rl = mRegisteredReceivers.get(receiver.asBinder());
+            if (rl == null) {
+                rl = new ReceiverList(this, callerApp, callingPid, callingUid,
+                        userId, receiver);
+                if (rl.app != null) {
+                    final int totalReceiversForApp = rl.app.mReceivers.numberOfReceivers();
+                    if (totalReceiversForApp >= MAX_RECEIVERS_ALLOWED_PER_APP) {
+                        throw new IllegalStateException("Too many receivers, total of "
+                                + totalReceiversForApp + ", registered for pid: "
+                                + rl.pid + ", callerPackage: " + callerPackage);
+                    }
+                    rl.app.mReceivers.addReceiver(rl);
+                } else {
+                    try {
+                        receiver.asBinder().linkToDeath(rl, 0);
+                    } catch (RemoteException e) {
+                        return sticky;
+                    }
+                    rl.linkedToDeath = true;
+                }
+                mRegisteredReceivers.put(receiver.asBinder(), rl);
+            } else if (rl.uid != callingUid) {
+                throw new IllegalArgumentException(
+                        "Receiver requested to register for uid " + callingUid
+                        + " was previously registered for uid " + rl.uid
+                        + " callerPackage is " + callerPackage);
+            } else if (rl.pid != callingPid) {
+                throw new IllegalArgumentException(
+                        "Receiver requested to register for pid " + callingPid
+                        + " was previously registered for pid " + rl.pid
+                        + " callerPackage is " + callerPackage);
+            } else if (rl.userId != userId) {
+                throw new IllegalArgumentException(
+                        "Receiver requested to register for user " + userId
+                        + " was previously registered for user " + rl.userId
+                        + " callerPackage is " + callerPackage);
+            }
+            BroadcastFilter bf = new BroadcastFilter(filter, rl, callerPackage, callerFeatureId,
+                    receiverId, permission, callingUid, userId, instantApp, visibleToInstantApps,
+                    exported);
+            if (rl.containsFilter(filter)) {
+                Slog.w(TAG, "Receiver with filter " + filter
+                        + " already registered for pid " + rl.pid
+                        + ", callerPackage is " + callerPackage);
+            } else {
+                rl.add(bf);
+                if (!bf.debugCheck()) {
+                    Slog.w(TAG, "==> For Dynamic broadcast");
+                }
+                mReceiverResolver.addFilter(getPackageManagerInternal().snapshot(), bf);
+            }
+
+            // Enqueue broadcasts for all existing stickies that match
+            // this filter.
+            if (allSticky != null) {
+                ArrayList receivers = new ArrayList();
+                receivers.add(bf);
+                sticky = null;
+
+                final int stickyCount = allSticky.size();
+                for (int i = 0; i < stickyCount; i++) {
+                    final StickyBroadcast broadcast = allSticky.get(i);
+                    final int originalStickyCallingUid = allSticky.get(i).originalCallingUid;
+                    // TODO(b/281889567): consider using checkComponentPermission instead of
+                    //  canAccessUnexportedComponents
+                    if (sticky == null && (exported || originalStickyCallingUid == callingUid
+                            || ActivityManager.canAccessUnexportedComponents(
+                            originalStickyCallingUid))) {
+                        sticky = broadcast.intent;
+                    }
+                    BroadcastQueue queue = mBroadcastQueue;
+                    BroadcastRecord r = new BroadcastRecord(queue, broadcast.intent, null,
+                            null, null, -1, -1, false, null, null, null, null, OP_NONE,
+                            BroadcastOptions.makeWithDeferUntilActive(broadcast.deferUntilActive),
+                            receivers, null, null, 0, null, null, false, true, true, -1,
+                            originalStickyCallingUid, BackgroundStartPrivileges.NONE,
+                            false /* only PRE_BOOT_COMPLETED should be exempt, no stickies */,
+                            null /* filterExtrasForReceiver */,
+                            broadcast.originalCallingAppProcessState);
+                    queue.enqueueBroadcastLocked(r);
+                }
+            }
+
+            return sticky;
+        }
     }
 
     public void unregisterReceiver(IIntentReceiver receiver) {
