@@ -2525,8 +2525,13 @@ public class ActivityTaskManagerService extends IActivityTaskManager.Stub {
             return ParceledListSlice.emptyList();
         }
         mRecentTasks.loadRecentTasksIfNeeded(userId);
-        synchronized (mGlobalLock) {
-            return mRecentTasks.getRecentTasks(maxNum, flags, allowed, userId, callingUid);
+        WindowManagerService.boostPriorityForLockedSection();
+        try {
+            synchronized (mGlobalLock) {
+                return mRecentTasks.getRecentTasks(maxNum, flags, allowed, userId, callingUid);
+            }
+        } finally {
+            WindowManagerService.resetPriorityAfterLockedSection();
         }
     }
 
@@ -2535,11 +2540,13 @@ public class ActivityTaskManagerService extends IActivityTaskManager.Stub {
         enforceTaskPermission("getAllRootTaskInfos()");
         final long ident = Binder.clearCallingIdentity();
         try {
+            WindowManagerService.boostPriorityForLockedSection();
             synchronized (mGlobalLock) {
                 return mRootWindowContainer.getAllRootTaskInfos(INVALID_DISPLAY);
             }
         } finally {
             Binder.restoreCallingIdentity(ident);
+            WindowManagerService.resetPriorityAfterLockedSection();
         }
     }
 
@@ -3964,6 +3971,7 @@ public class ActivityTaskManagerService extends IActivityTaskManager.Stub {
         enforceTaskPermission("cancelTaskWindowTransition()");
         final long ident = Binder.clearCallingIdentity();
         try {
+            WindowManagerService.boostPriorityForLockedSection();
             synchronized (mGlobalLock) {
                 final Task task = mRootWindowContainer.anyTaskForId(taskId,
                         MATCH_ATTACHED_TASK_ONLY);
@@ -3975,6 +3983,7 @@ public class ActivityTaskManagerService extends IActivityTaskManager.Stub {
             }
         } finally {
             Binder.restoreCallingIdentity(ident);
+            WindowManagerService.resetPriorityAfterLockedSection();
         }
     }
 
