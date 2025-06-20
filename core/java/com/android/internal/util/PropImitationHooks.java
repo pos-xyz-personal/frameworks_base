@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2022-2024 Paranoid Android
+ * Copyright (C) 2022 Paranoid Android
  *           (C) 2023 ArrowOS
  *           (C) 2023 The LibreMobileOS Foundation
  *
@@ -75,20 +75,7 @@ public class PropImitationHooks {
     private static final String PROCESS_GMS_LEARNING = PACKAGE_GMS + ".learning";
     private static final String PROCESS_GMS_PERSISTENT = PACKAGE_GMS + ".persistent";
     private static final String PROCESS_GMS_SEARCH = PACKAGE_GMS + ".search";
-    private static final String PROCESS_GMS_UNSTABLE = PACKAGE_GMS + ".unstable";
     private static final String PROCESS_GMS_UPDATE = PACKAGE_GMS + ".update";
-
-    private static final String PROP_SECURITY_PATCH = "persist.sys.pihooks.security_patch";
-    private static final String PROP_FIRST_API_LEVEL = "persist.sys.pihooks.first_api_level";
-
-    private static final ComponentName GMS_ADD_ACCOUNT_ACTIVITY = ComponentName.unflattenFromString(
-            "com.google.android.gms/.auth.uiflows.minutemaid.MinuteMaidActivity");
-
-    private static final Boolean sDisableGmsProps = SystemProperties.getBoolean(
-            "persist.sys.pihooks.disable.gms_props", false);
-
-    private static final Boolean sDisableKeyAttestationBlock = SystemProperties.getBoolean(
-        "persist.sys.pihooks.disable.gms_key_attestation_block", false);
 
     private static final Map<String, String> sPixelNineXLProps = Map.of(
             "PRODUCT", "komodo",
@@ -170,7 +157,7 @@ public class PropImitationHooks {
     private static volatile String sStockFp, sNetflixModel;
 
     private static volatile String sProcessName;
-    private static volatile boolean sIsGms, sIsFinsky, sIsPhotos, sIsPixelLauncher, sIsASI;
+    private static volatile boolean sIsPhotos, sIsPixelLauncher, sIsASI;
 
     public static void setProps(Context context) {
         final String packageName = context.getPackageName();
@@ -187,29 +174,17 @@ public class PropImitationHooks {
             return;
         }
 
-        sCertifiedProps = res.getStringArray(R.array.config_certifiedBuildProperties);
-        sStockFp = res.getString(R.string.config_stockFingerprint);
-        sNetflixModel = res.getString(R.string.config_netflixSpoofModel);
-
         sProcessName = processName;
-        sIsGms = packageName.equals(PACKAGE_GMS) && processName.equals(PROCESS_GMS_UNSTABLE);
-        sIsFinsky = packageName.equals(PACKAGE_FINSKY);
         sIsPhotos = packageName.equals(PACKAGE_GPHOTOS);
         sIsPixelLauncher = packageName.equals(PACKAGE_NEXUSLAUNCHER);
         sIsASI = packageName.equals(PACKAGE_ASI);
 
-        /* Set certified properties for GMSCore
-         * Set stock fingerprint for ARCore
+        /* Set stock fingerprint for ARCore
          * Set Pixel 9 Pro for GMS device configurator
          * Set Pixel XL for Google Photos
-         * Set custom model for Netflix
          */
 
         switch (processName) {
-            case PROCESS_GMS_UNSTABLE:
-                dlog("Setting certified props for: " + packageName + " process: " + processName);
-                setCertifiedPropsForGms();
-                return;
             case PROCESS_GMS_PERSISTENT:
             case PROCESS_GMS_GAPPS:
             case PROCESS_GMS_GSERVICE:
@@ -254,12 +229,6 @@ public class PropImitationHooks {
                 dlog("Spoofing Pixel XL for Google Photos");
                 setProps(sPixelXLProps);
                 return;
-            case PACKAGE_NETFLIX:
-                if (!sNetflixModel.isEmpty()) {
-                    dlog("Setting model to " + sNetflixModel + " for Netflix");
-                    setPropValue("MODEL", sNetflixModel);
-                }
-                return;
         }
     }
 
@@ -285,119 +254,12 @@ public class PropImitationHooks {
         }
     }
 
-    private static void setCertifiedPropsForGms() {
-        if (sDisableGmsProps) {
-            dlog("GMS prop imitation is disabled by user");
-            setSystemProperty(PROP_SECURITY_PATCH, Build.VERSION.SECURITY_PATCH);
-            setSystemProperty(PROP_FIRST_API_LEVEL,
-                    Integer.toString(Build.VERSION.DEVICE_INITIAL_SDK_INT));
-            return;
-        }
-
-        if (sCertifiedProps.length == 0) {
-            dlog("Certified props are not set");
-            return;
-        }
-        final boolean was = isGmsAddAccountActivityOnTop();
-        final TaskStackListener taskStackListener = new TaskStackListener() {
-            @Override
-            public void onTaskStackChanged() {
-                final boolean is = isGmsAddAccountActivityOnTop();
-                if (is ^ was) {
-                    dlog("GmsAddAccountActivityOnTop is:" + is + " was:" + was +
-                            ", killing myself!"); // process will restart automatically later
-                    Process.killProcess(Process.myPid());
-                }
-            }
-        };
-        if (!was) {
-            dlog("Spoofing build for GMS");
-            setCertifiedProps();
-        } else {
-            dlog("Skip spoofing build for GMS, because GmsAddAccountActivityOnTop");
-        }
-        try {
-            ActivityTaskManager.getService().registerTaskStackListener(taskStackListener);
-        } catch (Exception e) {
-            Log.e(TAG, "Failed to register task stack listener!", e);
-        }
-    }
-
-    private static void setCertifiedProps() {
-        for (String entry : sCertifiedProps) {
-            // Each entry must be of the format FIELD:value
-            final String[] fieldAndProp = entry.split(":", 2);
-            if (fieldAndProp.length != 2) {
-                Log.e(TAG, "Invalid entry in certified props: " + entry);
-                continue;
-            }
-            setPropValue(fieldAndProp[0], fieldAndProp[1]);
-        }
-        setSystemProperty(PROP_SECURITY_PATCH, Build.VERSION.SECURITY_PATCH);
-        setSystemProperty(PROP_FIRST_API_LEVEL,
-                Integer.toString(Build.VERSION.DEVICE_INITIAL_SDK_INT));
-    }
-
     private static void setSystemProperty(String name, String value) {
         try {
             SystemProperties.set(name, value);
             dlog("Set system prop " + name + "=" + value);
         } catch (Exception e) {
             Log.e(TAG, "Failed to set system prop " + name + "=" + value, e);
-        }
-    }
-
-    private static boolean isGmsAddAccountActivityOnTop() {
-        try {
-            final ActivityTaskManager.RootTaskInfo focusedTask =
-                    ActivityTaskManager.getService().getFocusedRootTaskInfo();
-            return focusedTask != null && focusedTask.topActivity != null
-                    && focusedTask.topActivity.equals(GMS_ADD_ACCOUNT_ACTIVITY);
-        } catch (Exception e) {
-            Log.e(TAG, "Unable to get top activity!", e);
-        }
-        return false;
-    }
-
-    public static boolean shouldBypassTaskPermission(Context context) {
-        if (sDisableGmsProps) {
-            return false;
-        }
-
-        // GMS doesn't have MANAGE_ACTIVITY_TASKS permission
-        final int callingUid = Binder.getCallingUid();
-        final int gmsUid;
-        try {
-            gmsUid = context.getPackageManager().getApplicationInfo(PACKAGE_GMS, 0).uid;
-            dlog("shouldBypassTaskPermission: gmsUid:" + gmsUid + " callingUid:" + callingUid);
-        } catch (Exception e) {
-            Log.e(TAG, "shouldBypassTaskPermission: unable to get gms uid", e);
-            return false;
-        }
-        return gmsUid == callingUid;
-    }
-
-    private static boolean isCallerSafetyNet() {
-        return sIsGms && Arrays.stream(Thread.currentThread().getStackTrace())
-                .anyMatch(elem -> elem.getClassName().contains("DroidGuard"));
-    }
-
-    public static void onEngineGetCertificateChain() {
-        if (sDisableKeyAttestationBlock) {
-            dlog("Key attestation blocking is disabled by user");
-            return;
-        }
-
-        // If a keybox is found, don't block key attestation
-        if (KeyProviderManager.isKeyboxAvailable()) {
-            dlog("Key attestation blocking is disabled because a keybox is defined to spoof");
-            return;
-        }
-
-        // Check stack for SafetyNet or Play Integrity
-        if (isCallerSafetyNet() || sIsFinsky) {
-            dlog("Blocked key attestation sIsGms=" + sIsGms + " sIsFinsky=" + sIsFinsky);
-            throw new UnsupportedOperationException();
         }
     }
 
