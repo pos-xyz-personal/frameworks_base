@@ -153,9 +153,6 @@ public class PropImitationHooks {
             "PIXEL_2024_MIDYEAR_EXPERIENCE"
     );
 
-    private static volatile String[] sCertifiedProps;
-    private static volatile String sStockFp, sNetflixModel;
-
     private static volatile String sProcessName;
     private static volatile boolean sIsPhotos, sIsPixelLauncher, sIsASI;
 
@@ -194,12 +191,6 @@ public class PropImitationHooks {
                 dlog("Spoofing Pixel 5a for: " + packageName + " process: " + processName);
                 setProps(sPixelFiveProps);
                 return;
-        }
-
-        if (!sStockFp.isEmpty() && packageName.equals(PACKAGE_ARCORE)) {
-            dlog("Setting stock fingerprint for: " + packageName);
-            setPropValue("FINGERPRINT", sStockFp);
-            return;
         }
 
         switch (packageName) {
