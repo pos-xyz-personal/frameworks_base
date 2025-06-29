@@ -5829,7 +5829,8 @@ public class NotificationManagerService extends SystemService {
         @Override
         public ParceledListSlice<ZenModeConfig.ZenRule> getZenRules() throws RemoteException {
             enforcePolicyAccess(Binder.getCallingUid(), "getAutomaticZenRules");
-            return new ParceledListSlice<ZenModeConfig.ZenRule>(mZenModeHelper.getZenRules());
+            return new ParceledListSlice<ZenModeConfig.ZenRule>(
+                    mZenModeHelper.getZenRules(getCallingZenUser()));
         }
 
         @Override
@@ -5841,7 +5842,7 @@ public class NotificationManagerService extends SystemService {
             enforcePolicyAccess(callingUid, "getAutomaticZenRules");
             List<AutomaticZenRule.AzrWithId> ruleList = new ArrayList<>();
             for (Map.Entry<String, AutomaticZenRule> rule :
-                    mZenModeHelper.getAutomaticZenRules().entrySet()) {
+                    mZenModeHelper.getAutomaticZenRules(getCallingZenUser()).entrySet()) {
                 ruleList.add(new AutomaticZenRule.AzrWithId(rule.getKey(), rule.getValue()));
             }
             return new ParceledListSlice<>(ruleList);
