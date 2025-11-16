@@ -185,6 +185,7 @@ public class AutomaticBrightnessController {
 
     // The time when the light sensor was enabled.
     private long mLightSensorEnableTime;
+    private long mLightSensorEnableTimestamp;
 
     // The currently accepted nominal ambient light level.
     private float mAmbientLux = INVALID_LUX;
@@ -717,6 +718,7 @@ public class AutomaticBrightnessController {
             if (!mLightSensorEnabled) {
                 mLightSensorEnabled = true;
                 mLightSensorEnableTime = mClock.uptimeMillis();
+                mLightSensorEnableTimestamp = mClock.uptimeMillis();
                 mCurrentLightSensorRate = mInitialLightSensorRate;
                 registerForegroundAppUpdater();
                 mSensorManager.registerListener(mLightSensorListener, mLightSensor,
@@ -1417,10 +1419,16 @@ public class AutomaticBrightnessController {
         @Override
         public void onSensorChanged(SensorEvent event) {
             if (mLightSensorEnabled) {
+                final float lux = event.values[0];
+                final long timeSinceEnable = mClock.uptimeMillis() - mLightSensorEnableTimestamp;
+                if (timeSinceEnable < 500 && lux <= 0) {
+                    Slog.d(TAG, "Ignoring invalid lux during sensor warmup: " + lux 
+                        + "lux (time since enable: " + timeSinceEnable + "ms)");
+                    return;
+                }
                 // The time received from the sensor is in nano seconds, hence changing it to ms
                 final long time = (mDisplayManagerFlags.offloadControlsDozeAutoBrightness())
                         ? TimeUnit.NANOSECONDS.toMillis(event.timestamp) : mClock.uptimeMillis();
-                final float lux = event.values[0];
                 handleLightSensorEvent(time, lux);
             }
         }
